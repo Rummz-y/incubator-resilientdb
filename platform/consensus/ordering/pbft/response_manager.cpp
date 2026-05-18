@@ -58,6 +58,9 @@ ResponseManager::ResponseManager(const ResDBConfig& config,
   stop_ = false;
   local_id_ = 1;
   timeout_length_ = 5000000;
+  // Shard leaders to round-robin across (node ids)
+  shard_leader_ids_ = {1, 5, 9, 13};
+  current_shard_idx_ = 0;
 
   if (config_.GetPublicKeyCertificateInfo()
               .public_key()
@@ -344,7 +347,11 @@ int ResponseManager::DoBatch(
   batch_request.SerializeToString(new_request->mutable_data());
   new_request->set_hash(SignatureVerifier::CalculateHash(new_request->data()));
   new_request->set_proxy_id(config_.GetSelfInfo().id());
-  replica_communicator_->SendMessage(*new_request, GetPrimary());
+  // Round-robin across shard leaders
+  int target_leader = shard_leader_ids_[current_shard_idx_ % shard_leader_ids_.size()];
+  current_shard_idx_++;
+  LOG(ERROR) << "[SHARD] Sending batch to shard leader id:" << target_leader;
+  replica_communicator_->SendMessage(*new_request, target_leader);
   send_num_++;
   LOG(INFO) << "send msg to primary:" << GetPrimary()
             << " batch size:" << batch_req.size();

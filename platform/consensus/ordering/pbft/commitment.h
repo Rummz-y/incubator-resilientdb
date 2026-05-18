@@ -18,6 +18,7 @@
  */
 
 #pragma once
+#include "platform/consensus/ordering/pbft/two_phase_commit.h"
 
 #include "platform/common/queue/batch_queue.h"
 #include "platform/config/resdb_config.h"
@@ -55,6 +56,7 @@ class Commitment {
   std::mutex rc_mutex_;
 
   DuplicateManager* GetDuplicateManager();
+  TwoPhaseCommit* GetTwoPhaseCommit() { return two_phase_commit_.get(); }
 
  protected:
   virtual int PostProcessExecutedMsg();
@@ -77,6 +79,7 @@ class Commitment {
            std::pair<std::unique_ptr<Context>, std::unique_ptr<Request>>>
       pending_recovery_;
   std::unique_ptr<DuplicateManager> duplicate_manager_;
+  std::unique_ptr<TwoPhaseCommit> two_phase_commit_;
 };
 
 }  // namespace resdb

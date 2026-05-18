@@ -18,6 +18,7 @@
  */
 
 #include "platform/consensus/ordering/pbft/commitment.h"
+#include "platform/consensus/ordering/pbft/two_phase_commit.h"
 
 #include <glog/logging.h>
 #include <unistd.h>
@@ -36,6 +37,7 @@ Commitment::Commitment(const ResDBConfig& config,
       stop_(false),
       replica_communicator_(replica_communicator),
       verifier_(verifier) {
+  two_phase_commit_ = std::make_unique<TwoPhaseCommit>(config_, replica_communicator_);
   executed_thread_ = std::thread(&Commitment::PostProcessExecutedMsg, this);
   global_stats_ = Stats::GetGlobalStats();
   duplicate_manager_ = std::make_unique<DuplicateManager>(config);
@@ -338,6 +340,12 @@ int Commitment::PostProcessExecutedMsg() {
     request.set_current_view(batch_resp->current_view());
     request.set_proxy_id(batch_resp->proxy_id());
     request.set_primary_id(batch_resp->primary_id());
+    // ---- 2PC: Run before sending response to proxy ----
+    // Any shard leader that receives a transaction acts as coordinator
+    if (two_phase_commit_->IsShardLeader()) {
+      LOG(ERROR) << "[2PC] Shard leader running 2PC for seq:" << request.seq();
+      two_phase_commit_->RunTwoPhaseCommit(request);
+    }
     LOG(ERROR) << "send back to proxy:" << batch_resp->proxy_id();
     batch_resp->SerializeToString(request.mutable_data());
     replica_communicator_->SendMessage(request, request.proxy_id());

@@ -18,6 +18,7 @@
  */
 
 #pragma once
+#include <vector>
 #include <semaphore.h>
 
 #include "platform/config/resdb_config.h"
@@ -94,6 +95,8 @@ class ResponseManager {
   Stats* global_stats_;
   SystemInfo* system_info_;
   std::atomic<int> send_num_;
+  std::vector<int> shard_leader_ids_;
+  std::atomic<int> current_shard_idx_{0};
   SignatureVerifier* verifier_;
 
   std::thread checking_timeout_thread_;

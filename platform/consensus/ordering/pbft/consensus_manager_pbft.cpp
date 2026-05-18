@@ -266,6 +266,12 @@ int ConsensusManagerPBFT::InternalConsensusCommit(
                                             std::move(request));
     case Request::TYPE_CUSTOM_QUERY:
       return query_->ProcessCustomQuery(std::move(context), std::move(request));
+    case Request::TYPE_2PC_PREPARE:
+      return commitment_->GetTwoPhaseCommit()->ProcessPrepare(std::move(request));
+    case Request::TYPE_2PC_VOTE:
+      return commitment_->GetTwoPhaseCommit()->ProcessVote(std::move(request));
+    case Request::TYPE_2PC_COMMIT:
+      return commitment_->GetTwoPhaseCommit()->ProcessCommit(std::move(request));
     case Request::TYPE_RECOVERY_DATA:
       return ProcessRecoveryData(std::move(context), std::move(request));
     case Request::TYPE_RECOVERY_DATA_RESP:
