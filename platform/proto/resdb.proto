@@ -61,6 +61,11 @@ message Request {
         TYPE_2PC_PREPARE = 22;
         TYPE_2PC_VOTE = 23;
         TYPE_2PC_COMMIT = 24;
+        
+        TYPE_PAXOS_PREPARE  = 30;
+        TYPE_PAXOS_PROMISE  = 31;
+        TYPE_PAXOS_ACCEPT   = 32;
+        TYPE_PAXOS_ACCEPTED = 33;
 
         NUM_OF_TYPE = 25; // the total number of types.
                        // Used to create the collector.

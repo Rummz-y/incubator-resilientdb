@@ -60,6 +60,9 @@ class ConsensusManagerPBFT : public ConsensusManager {
 
   int ProcessRecoveryDataResponse(std::unique_ptr<Context> context,
                                   std::unique_ptr<Request> request);
+                                  
+  int TriggerIntraShardConsensus(std::unique_ptr<Context> context,
+                                std::unique_ptr<Request> request);
 
  protected:
   int InternalConsensusCommit(std::unique_ptr<Context> context,

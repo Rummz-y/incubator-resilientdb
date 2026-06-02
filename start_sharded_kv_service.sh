@@ -1,4 +1,3 @@
-#!/bin/bash
 pkill kv_service
 sleep 2
 
