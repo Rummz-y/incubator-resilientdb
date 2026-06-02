@@ -1,5 +1,5 @@
 #include "platform/consensus/ordering/pbft/two_phase_commit.h"
-#include "platform/consensus/ordering/pbft/algorithm/consensus_manager_pbft.h"
+
 #include <glog/logging.h>
 #include <chrono>
 
@@ -9,42 +9,53 @@ TwoPhaseCommit::TwoPhaseCommit(const ResDBConfig& config,
                                ReplicaCommunicator* replica_communicator)
     : config_(config), replica_communicator_(replica_communicator) {
   global_stats_ = Stats::GetGlobalStats();
-
-  // Count shard leaders only — one per shard of 4
-  // nodes 1,5,9,13 are leaders; total = 4
   total_replicas_ = GetShardLeaders().size();
 
-  LOG(ERROR) << "[2PC] Init node:" << config_.GetSelfInfo().id()
+  // Determine which shard this node belongs to and create its PaxosManager
+  int self_id = config_.GetSelfInfo().id();
+  int shard_id = 0;
+  std::vector<int> shard_members;
+
+  if (self_id >= 1  && self_id <= 4)  { shard_id = 1; shard_members = {1,2,3,4}; }
+  if (self_id >= 5  && self_id <= 8)  { shard_id = 2; shard_members = {5,6,7,8}; }
+  if (self_id >= 9  && self_id <= 12) { shard_id = 3; shard_members = {9,10,11,12}; }
+  if (self_id >= 13 && self_id <= 16) { shard_id = 4; shard_members = {13,14,15,16}; }
+
+  if (shard_id > 0) {
+    paxos_manager_ = std::make_unique<PaxosManager>(
+        config_, replica_communicator_, shard_id, shard_members);
+  }
+
+  LOG(ERROR) << "[2PC] Init node:" << self_id
              << " port:" << config_.GetSelfInfo().port()
-             << " is_shard_leader:" << IsShardLeader(config_.GetSelfInfo().id())
+             << " shard_id:" << shard_id
+             << " is_shard_leader:" << IsShardLeader(self_id)
              << " is_coordinator:" << IsCoordinator()
              << " total_shard_leaders:" << total_replicas_;
 }
 
 TwoPhaseCommit::~TwoPhaseCommit() {}
 
-// ── Helper: which nodes are shard leaders ────────────────────────────────────
-// global.config has 16 nodes in groups of 4.
-// Leaders are the first node of each group: 1, 5, 9, 13.
+bool TwoPhaseCommit::IsShardLeader() const {
+  return IsShardLeader(config_.GetSelfInfo().id());
+}
 
 bool TwoPhaseCommit::IsShardLeader(int node_id) const {
-  return (node_id == 1 || node_id == 5 ||
-          node_id == 9 || node_id == 13);
+  int port = config_.GetSelfInfo().port();
+  return (port == 10001 || port == 10005 ||
+          port == 10009 || port == 10013);
 }
 
 std::set<int> TwoPhaseCommit::GetShardLeaders() const {
   return {1, 5, 9, 13};
 }
 
-// ── Back-pointer setter ───────────────────────────────────────────────────────
-
 void TwoPhaseCommit::SetConsensusManager(ConsensusManagerPBFT* manager) {
   consensus_manager_ = manager;
 }
 
 bool TwoPhaseCommit::IsCoordinator() const {
-  // Node 1 is the permanent coordinator (shard 1 leader, receives proxy traffic)
-  return config_.GetSelfInfo().id() == 1;
+  return config_.GetSelfInfo().port() == 10001;
 }
 
 // ── Coordinator: run full 2PC round ──────────────────────────────────────────
@@ -59,14 +70,10 @@ int TwoPhaseCommit::RunTwoPhaseCommit(const Request& committed_request) {
     txn_states_[seq] = state;
   }
 
-  // ── Phase 1: send PREPARE to all shard leaders ───────────────────────
   auto t0 = std::chrono::steady_clock::now();
   BroadcastPrepare(committed_request);
   LOG(ERROR) << "[2PC] Phase 1: PREPARE sent to shard leaders for seq:" << seq;
 
-  // Wait for all shard leaders to vote YES
-  // Each leader runs intra-shard PBFT before voting, so this may take
-  // longer than a simple ACK — use a generous timeout
   {
     std::unique_lock<std::mutex> lk(mutex_);
     bool ok = state->cv.wait_for(
@@ -89,7 +96,6 @@ int TwoPhaseCommit::RunTwoPhaseCommit(const Request& committed_request) {
              << " shard leaders voted YES for seq:" << seq
              << " in " << prepare_ms << "ms";
 
-  // ── Phase 2: send COMMIT to all shard leaders ────────────────────────
   BroadcastCommit(seq);
   auto t2 = std::chrono::steady_clock::now();
   long commit_ms =
@@ -111,12 +117,9 @@ void TwoPhaseCommit::BroadcastPrepare(const Request& request) {
   auto leaders = GetShardLeaders();
   int self_id = config_.GetSelfInfo().id();
 
+  // Send PREPARE to other shard leaders
   for (int leader_id : leaders) {
-    if (leader_id == self_id) {
-      // Coordinator handles its own shard via local PBFT below in ProcessPrepare
-      // but since coordinator IS the leader for shard 1, we trigger it directly
-      continue;
-    }
+    if (leader_id == self_id) continue;
     Request msg;
     msg.set_type(Request::TYPE_2PC_PREPARE);
     msg.set_seq(request.seq());
@@ -126,18 +129,13 @@ void TwoPhaseCommit::BroadcastPrepare(const Request& request) {
     replica_communicator_->SendMessage(msg, leader_id);
   }
 
-  // Coordinator also runs intra-shard PBFT for its own shard (shard 1)
-  // and counts itself as one vote immediately after
-  LOG(ERROR) << "[2PC] Coordinator running intra-shard PBFT for shard 1 seq:"
+  // Coordinator runs Paxos for its own shard (shard 1)
+  LOG(ERROR) << "[2PC] Coordinator running intra-shard Paxos for shard 1 seq:"
              << request.seq();
 
-  if (consensus_manager_ != nullptr) {
-    auto ctx = std::make_unique<Context>();
-    auto req = std::make_unique<Request>(request);
-    req->set_type(Request::TYPE_NEW_TXNS);
-    int ret = consensus_manager_->TriggerIntraShardConsensus(
-        std::move(ctx), std::move(req));
-    LOG(ERROR) << "[2PC] Coordinator shard 1 PBFT result:" << ret
+  if (paxos_manager_ != nullptr) {
+    int ret = paxos_manager_->RunPaxos(request);
+    LOG(ERROR) << "[2PC+Paxos] Coordinator shard 1 Paxos result:" << ret
                << " for seq:" << request.seq();
   }
 
@@ -156,7 +154,6 @@ void TwoPhaseCommit::BroadcastPrepare(const Request& request) {
 void TwoPhaseCommit::BroadcastCommit(uint64_t seq) {
   auto leaders = GetShardLeaders();
   int self_id = config_.GetSelfInfo().id();
-
   for (int leader_id : leaders) {
     if (leader_id == self_id) continue;
     Request msg;
@@ -167,7 +164,7 @@ void TwoPhaseCommit::BroadcastCommit(uint64_t seq) {
   }
 }
 
-// ── Participant: receive PREPARE, run intra-shard PBFT, vote YES ──────────────
+// ── Participant: receive 2PC PREPARE, run Paxos, vote YES ────────────────────
 
 int TwoPhaseCommit::ProcessPrepare(std::unique_ptr<Request> request) {
   uint64_t seq = request->seq();
@@ -176,40 +173,30 @@ int TwoPhaseCommit::ProcessPrepare(std::unique_ptr<Request> request) {
   LOG(ERROR) << "[2PC] Shard leader node:" << config_.GetSelfInfo().id()
              << " received PREPARE seq:" << seq
              << " from coordinator:" << coordinator_id
-             << " — running intra-shard PBFT before voting";
+             << " — running intra-shard Paxos before voting";
 
-  // ── KEY CHANGE: run PBFT with this shard's followers first ───────────
-  // Only do this if we have the back-pointer to the consensus manager
-  if (consensus_manager_ != nullptr) {
-    auto ctx = std::make_unique<Context>();
-    auto req = std::make_unique<Request>(*request);
-    req->set_type(Request::TYPE_NEW_TXNS);
-
-    int ret = consensus_manager_->TriggerIntraShardConsensus(
-        std::move(ctx), std::move(req));
-
+  if (paxos_manager_ != nullptr) {
+    int ret = paxos_manager_->RunPaxos(*request);
     if (ret != 0) {
-      LOG(ERROR) << "[2PC] Intra-shard PBFT FAILED node:"
+      LOG(ERROR) << "[2PC+Paxos] Intra-shard Paxos FAILED node:"
                  << config_.GetSelfInfo().id()
                  << " seq:" << seq << " ret:" << ret;
-      // Assignment says no aborts — log and continue anyway
     } else {
-      LOG(ERROR) << "[2PC] Intra-shard PBFT DONE node:"
+      LOG(ERROR) << "[2PC+Paxos] Intra-shard Paxos DONE node:"
                  << config_.GetSelfInfo().id()
                  << " seq:" << seq << " — sending VOTE_YES";
     }
   } else {
-    LOG(ERROR) << "[2PC] WARNING: no consensus_manager_ set on node:"
+    LOG(ERROR) << "[2PC] WARNING: no paxos_manager_ on node:"
                << config_.GetSelfInfo().id()
                << " — voting YES without intra-shard consensus";
   }
 
-  // Send VOTE_YES back to coordinator
   Request vote;
   vote.set_type(Request::TYPE_2PC_VOTE);
   vote.set_seq(seq);
   vote.set_sender_id(config_.GetSelfInfo().id());
-  vote.set_ret(0);  // YES
+  vote.set_ret(0);
   replica_communicator_->SendMessage(vote, coordinator_id);
 
   LOG(ERROR) << "[2PC] Node:" << config_.GetSelfInfo().id()
@@ -232,7 +219,7 @@ int TwoPhaseCommit::ProcessVote(std::unique_ptr<Request> request) {
     std::lock_guard<std::mutex> lk(mutex_);
     auto it = txn_states_.find(seq);
     if (it == txn_states_.end()) {
-      LOG(ERROR) << "[2PC] No state for seq:" << seq << " (already committed?)";
+      LOG(ERROR) << "[2PC] No state for seq:" << seq;
       return 0;
     }
     state = it->second;

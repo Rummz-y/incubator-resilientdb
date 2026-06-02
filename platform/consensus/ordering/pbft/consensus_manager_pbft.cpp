@@ -76,7 +76,6 @@ ConsensusManagerPBFT::ConsensusManagerPBFT(
       },
       [&](int seq) { message_manager_->SetNextCommitSeq(seq + 1); });
   LOG(ERROR) << " recovery is done";
-  commitment_->GetTwoPhaseCommit()->SetConsensusManager(this);
 }
 
 void ConsensusManagerPBFT::SetNeedCommitQC(bool need_qc) {
@@ -329,15 +328,6 @@ int ConsensusManagerPBFT::ProcessRecoveryDataResponse(
     std::unique_ptr<Context> context, std::unique_ptr<Request> request) {
   recovery_queue_.Push(std::move(request));
   return 0;
-}
-
-int ConsensusManagerPBFT::TriggerIntraShardConsensus(
-    std::unique_ptr<Context> context,
-    std::unique_ptr<Request> request) {
-  LOG(ERROR) << "[2PC] TriggerIntraShardConsensus node:"
-             << config_.GetSelfInfo().id()
-             << " seq:" << request->seq();
-  return InternalConsensusCommit(std::move(context), std::move(request));
 }
 
 void ConsensusManagerPBFT::RemoteRecoveryProcess() {
